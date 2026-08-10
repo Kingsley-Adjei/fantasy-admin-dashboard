@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { Users, Shield, Calendar, Activity, Zap, Plus, Play, Radio, ClipboardList, Trophy } from 'lucide-react';
 import AppShell from '../../components/layout/AppShell';
 import StatCard from '../../components/ui/StatCard';
-import { getMatches, getCurrentGameweek, getMyLeagues, getLeagueStandings } from '../../lib/api';
+import { getMatches, getCurrentGameweek, getTeams } from '../../lib/api';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { useToast } from '../../hooks/useToast';
 import { timeAgo } from '../../components/ui/dateUtils';
@@ -18,30 +18,39 @@ export default function DashboardPage() {
   const [liveMatches, setLiveMatches] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // allSettled, not all. These three are independent sources — a failure in
+  // one is not a reason to discard the other two. The previous Promise.all
+  // meant a single rejection (getMyLeagues 404s for any account without a
+  // fantasy team, which every admin is) threw away the matches and gameweek
+  // that had already come back, and the whole dashboard rendered empty.
   const loadData = async () => {
-    try {
-      const [mData, gwData, lData] = await Promise.all([
-        getMatches(),
-        getCurrentGameweek(),
-        getMyLeagues(),
-      ]);
-      const mArr = Array.isArray(mData) ? mData : [];
-      setMatches(mArr);
-      setLiveMatches(mArr.filter(m => m.live));
-      setGameweek(gwData);
+    const [matchRes, gwRes, teamRes] = await Promise.allSettled([
+      getMatches(),
+      getCurrentGameweek(),
+      getTeams(),
+    ]);
 
-      // Real registered-team standings, not a guessed headcount.
-      const lArr = Array.isArray(lData) ? lData : [];
-      const globalLeague = lArr.find(l => l.isGlobal);
-      if (globalLeague) {
-        const s = await getLeagueStandings(globalLeague.id).catch(() => null);
-        setStandings(s?.standings || []);
-      }
-    } catch (e) {
-      addToast('Could not load dashboard data', 'error');
-    } finally {
-      setLoading(false);
-    }
+    const mArr = matchRes.status === 'fulfilled' && Array.isArray(matchRes.value)
+      ? matchRes.value : [];
+    setMatches(mArr);
+    setLiveMatches(mArr.filter(m => m.live));
+
+    if (gwRes.status === 'fulfilled') setGameweek(gwRes.value);
+
+    setStandings(
+      teamRes.status === 'fulfilled' && Array.isArray(teamRes.value) ? teamRes.value : []
+    );
+
+    // Name what actually failed instead of a blanket "could not load".
+    const failed = [
+      matchRes.status === 'rejected' && 'matches',
+      gwRes.status === 'rejected' && 'gameweek',
+      teamRes.status === 'rejected' && 'teams',
+    ].filter(Boolean);
+
+    if (failed.length) addToast(`Could not load ${failed.join(', ')}`, 'error');
+
+    setLoading(false);
   };
 
   useEffect(() => { loadData(); }, []);
@@ -61,8 +70,12 @@ export default function DashboardPage() {
       loadData();
     },
     // Fired by AdminController after finalize-gameweek banks every team's
-    // season total — Top Teams would otherwise stay stale until manual reload.
+    // season total, and by recalculate — Top Teams would otherwise stay stale
+    // until manual reload.
     onLeaderboardUpdated: () => loadData(),
+    // The Gameweek stat card reads /api/gameweek/current; set-deadline and
+    // start-gameweek change it.
+    onGameweekUpdated: () => loadData(),
   });
 
   const today = matches.filter(m => {

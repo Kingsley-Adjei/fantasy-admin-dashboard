@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { Shield, Users, Plus, ChevronRight, Trophy } from 'lucide-react';
 import AppShell from '../../components/layout/AppShell';
 import Modal from '../../components/ui/Modal';
-import { getMyLeagues, getLeagueStandings, createLeague } from '../../lib/api';
+import { getLeagues, getLeagueStandings, createLeague } from '../../lib/api';
 import { useToast } from '../../hooks/useToast';
 import { useWebSocket } from '../../hooks/useWebSocket';
 
@@ -20,10 +20,10 @@ export default function LeaguesPage() {
 
   const load = async () => {
     try {
-      const data = await getMyLeagues();
+      const data = await getLeagues();
       setLeagues(Array.isArray(data) ? data : []);
     } catch (e) {
-      addToast('Could not load leagues', 'error');
+      addToast(e.message || 'Could not load leagues', 'error');
     } finally {
       setLoading(false);
     }

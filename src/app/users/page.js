@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Search, Shield, Users, Star, ChevronRight, X } from 'lucide-react';
 import AppShell from '../../components/layout/AppShell';
-import { getPlayers, getMyLeagues, getLeagueStandings, getTeamSquad } from '../../lib/api';
+import { getPlayers, getTeams, getTeamSquad } from '../../lib/api';
 import { useToast } from '../../hooks/useToast';
 import { useWebSocket } from '../../hooks/useWebSocket';
 
@@ -20,22 +20,28 @@ export default function UsersPage() {
   const [squad, setSquad] = useState(null);
   const [loadingSquad, setLoadingSquad] = useState(false);
 
+  // Players and teams are independent — allSettled so a failure in one still
+  // renders the other. Under the previous Promise.all the leagues call 404'd
+  // (the admin has no fantasy team) and took the already-fetched player list
+  // down with it, leaving both tabs blank.
   const load = async () => {
-    try {
-      const [pData, lData] = await Promise.all([getPlayers(), getMyLeagues()]);
-      setPlayers(Array.isArray(pData) ? pData : []);
+    const [playerRes, teamRes] = await Promise.allSettled([getPlayers(), getTeams()]);
 
-      // Get standings from global league for team list
-      const globalLeague = (Array.isArray(lData) ? lData : []).find(l => l.isGlobal);
-      if (globalLeague) {
-        const s = await getLeagueStandings(globalLeague.id);
-        setTeams(s?.standings || []);
-      }
-    } catch (e) {
-      addToast('Could not load data', 'error');
-    } finally {
-      setLoading(false);
-    }
+    setPlayers(
+      playerRes.status === 'fulfilled' && Array.isArray(playerRes.value) ? playerRes.value : []
+    );
+    setTeams(
+      teamRes.status === 'fulfilled' && Array.isArray(teamRes.value) ? teamRes.value : []
+    );
+
+    const failed = [
+      playerRes.status === 'rejected' && 'players',
+      teamRes.status === 'rejected' && 'teams',
+    ].filter(Boolean);
+
+    if (failed.length) addToast(`Could not load ${failed.join(' and ')}`, 'error');
+
+    setLoading(false);
   };
 
   useEffect(() => { load(); }, []);

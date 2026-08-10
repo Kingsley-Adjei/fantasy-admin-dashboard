@@ -5,7 +5,7 @@ import AppShell from '../../components/layout/AppShell';
 import Modal from '../../components/ui/Modal';
 import {
   recalculatePoints, finalizeGameweek, setDeadline, startGameweek,
-  getMatches, getLeagueStandings, getMyLeagues, getCurrentGameweek,
+  getMatches, getLeagues, getTeams, getCurrentGameweek,
 } from '../../lib/api';
 import { useToast } from '../../hooks/useToast';
 import { useWebSocket } from '../../hooks/useWebSocket';
@@ -34,36 +34,47 @@ export default function TournamentPage() {
   const [startGwDeadline, setStartGwDeadline] = useState('');
   const [startGwSaving, setStartGwSaving] = useState(false);
 
+  // allSettled: the deadline and start-gameweek controls below only need the
+  // gameweek, so a failure fetching matches or leagues must not disable them.
   const load = async () => {
-    try {
-      const [mData, lData, gwData] = await Promise.all([
-        getMatches(),
-        getMyLeagues(),
-        getCurrentGameweek(),
-      ]);
-      const mArr = Array.isArray(mData) ? mData : [];
-      const lArr = Array.isArray(lData) ? lData : [];
-      setMatches(mArr);
-      setLeagues(lArr);
-      setGameweek(gwData);
-      if (gwData?.id) {
-        setDeadlineGw(gwData.id);
-        setStartGwId(gwData.id + 1);
-      }
+    const [matchRes, leagueRes, gwRes, teamRes] = await Promise.allSettled([
+      getMatches(),
+      getLeagues(),
+      getCurrentGameweek(),
+      getTeams(),
+    ]);
 
-      // Get global league standings for leader
-      const globalLeague = lArr.find(l => l.isGlobal);
-      if (globalLeague) {
-        try {
-          const s = await getLeagueStandings(globalLeague.id);
-          if (s?.standings?.length > 0) setLeader(s.standings[0]);
-        } catch {}
+    setMatches(
+      matchRes.status === 'fulfilled' && Array.isArray(matchRes.value) ? matchRes.value : []
+    );
+    setLeagues(
+      leagueRes.status === 'fulfilled' && Array.isArray(leagueRes.value) ? leagueRes.value : []
+    );
+
+    if (gwRes.status === 'fulfilled' && gwRes.value) {
+      setGameweek(gwRes.value);
+      if (gwRes.value.id) {
+        setDeadlineGw(gwRes.value.id);
+        setStartGwId(gwRes.value.id + 1);
       }
-    } catch (e) {
-      addToast('Could not load tournament data', 'error');
-    } finally {
-      setLoading(false);
     }
+
+    // The overall leader is the top-ranked team platform-wide — teams already
+    // arrive sorted by season total, so no second standings round-trip.
+    if (teamRes.status === 'fulfilled' && teamRes.value?.length > 0) {
+      setLeader(teamRes.value[0]);
+    }
+
+    const failed = [
+      matchRes.status === 'rejected' && 'matches',
+      leagueRes.status === 'rejected' && 'leagues',
+      gwRes.status === 'rejected' && 'gameweek',
+      teamRes.status === 'rejected' && 'teams',
+    ].filter(Boolean);
+
+    if (failed.length) addToast(`Could not load ${failed.join(', ')}`, 'error');
+
+    setLoading(false);
   };
 
   useEffect(() => { load(); }, []);
@@ -73,6 +84,10 @@ export default function TournamentPage() {
     // Fired after finalize-gameweek banks season totals — the leader card
     // and match counters here would otherwise go stale until manual reload.
     onLeaderboardUpdated: () => load(),
+    // set-deadline and start-gameweek both land here. This page's own forms
+    // trigger them, so without it the "GW n ACTIVE" badge and the prefilled
+    // gameweek numbers kept showing the values from before the action.
+    onGameweekUpdated: () => load(),
   });
 
   const handleRecalculate = async () => {

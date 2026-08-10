@@ -1,28 +1,58 @@
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://fantasy-backend-oune.onrender.com';
 
+/**
+ * Set once we've bounced the user to /login, so a page that fires several
+ * requests in parallel doesn't stack up redirects (and so an endpoint that
+ * legitimately 403s can't put us in a login loop).
+ */
+let redirectingToLogin = false;
+
+function sessionExpired() {
+  if (typeof window === 'undefined' || redirectingToLogin) return;
+  redirectingToLogin = true;
+  localStorage.removeItem('adminToken');
+  window.location.href = '/login';
+}
+
 export async function adminFetch(endpoint, options = {}) {
   const token = typeof window !== 'undefined' ? localStorage.getItem('adminToken') : null;
 
-  const res = await fetch(`${BASE_URL}${endpoint}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
-    },
-  });
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}${endpoint}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options.headers,
+      },
+    });
+  } catch (networkError) {
+    // Render free tier cold-starts can take ~30s and the fetch simply fails.
+    // Surface that as itself rather than as a mystery "Server error".
+    const err = new Error('Cannot reach the server. It may still be waking up.');
+    err.status = 0;
+    throw err;
+  }
 
+  // Spring Security has no authentication entry point configured, so an
+  // anonymous request is rejected by Http403ForbiddenEntryPoint with 403 —
+  // NOT 401. Both therefore have to mean "sign in again" here.
   if (res.status === 401 || res.status === 403) {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('adminToken');
-      window.location.href = '/login';
-    }
-    return null;
+    sessionExpired();
+    const err = new Error('Your admin session has expired. Please sign in again.');
+    err.status = res.status;
+    throw err;
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `Server error: ${res.status}`);
+    const body = await res.json().catch(() => ({}));
+    // Callers branch on `status` — notably to tell "this backend build predates
+    // the endpoint" (404) apart from a genuine failure.
+    const err = new Error(body.error || `Server error: ${res.status}`);
+    err.status = res.status;
+    err.code = body.code;
+    throw err;
   }
 
   const text = await res.text();
@@ -69,53 +99,16 @@ export const giveAppearancePoints = (matchId, playerIds) =>
     body: JSON.stringify(playerIds),
   });
 
-// ── Not live on the backend yet — see PointsService proposal below ──────────
-// Neither giveSinglePlayerEvent (hardcodes minutesPlayed=0) nor
-// giveAppearancePoints (hardcodes cleanSheet=false) can ever award the clean
-// sheet bonus. The only endpoint that honors minutesPlayed + cleanSheet is
-// the bulk /result endpoint, but that one skips any player who already has an
-// event for the match AND marks the match completed as a side effect — both
-// wrong for a standalone "give the clean sheet bonus" action. This calls a
-// new endpoint shaped exactly like giveAppearancePoints (matchId + player id
-// list) so it's a small, consistent addition once wired server-side:
+// Now live on the backend (AdminController + PointsService.giveCleanSheetBonus).
 //
-//   @PostMapping("/matches/{matchId}/clean-sheet")
-//   public ResponseEntity<?> giveCleanSheetBonus(
-//           @PathVariable Long matchId, @RequestBody List<Long> playerIds) {
-//       pointsService.giveCleanSheetBonus(matchId, playerIds);
-//       return ResponseEntity.ok(Map.of("message", "CLEAN_SHEET_BONUS_GIVEN"));
-//   }
+// This used to 404: neither giveSinglePlayerEvent (hardcodes minutesPlayed=0,
+// and calculatePoints only pays a clean sheet at 60+ minutes) nor
+// giveAppearancePoints (hardcodes cleanSheet=false) could award the bonus, and
+// the only path that honoured both — the bulk /result endpoint — also marks the
+// match completed as a side effect, which is wrong for a standalone action.
 //
-//   // PointsService — same shape as giveAppearancePoints, cleanSheet(true)
-//   // instead of a fixed point value, and calculatePoints(event, false) so it
-//   // doesn't also re-award appearance points for players who never got them.
-//   @Transactional
-//   public void giveCleanSheetBonus(Long matchId, List<Long> playerIds) {
-//       Match match = matchRepository.findById(matchId)
-//               .orElseThrow(() -> new RuntimeException("MATCH_NOT_FOUND"));
-//       if (match.isCompleted()) throw new RuntimeException("MATCH_ALREADY_PROCESSED");
-//       for (Long playerId : playerIds) {
-//           if (playerEventRepository.existsByPlayerIdAndMatchId(playerId, matchId)) continue;
-//           Player player = playerRepository.findById(playerId)
-//                   .orElseThrow(() -> new RuntimeException("PLAYER_NOT_FOUND"));
-//           if (!playsInMatch(player, match)) continue;
-//           PlayerEvent event = PlayerEvent.builder()
-//                   .player(player).match(match)
-//                   .goals(0).assists(0).minutesPlayed(90)
-//                   .yellowCards(0).redCards(0)
-//                   .cleanSheet(true)
-//                   .build();
-//           int pts = calculatePoints(event, false);
-//           event.setPointsEarned(pts);
-//           playerEventRepository.save(event);
-//           award(player, pts);
-//       }
-//       wsPublisher.publishPointsUpdated(matchId);
-//       evictAllCaches();
-//   }
-//
-// Until that exists server-side this call 404s — the Finalize Match modal
-// catches that and still completes the match so admins aren't blocked on it.
+// The Finalize Match modal still tolerates a failure here and completes the
+// match regardless, so an older backend deployment degrades rather than blocks.
 export const giveCleanSheetBonus = (matchId, playerIds) =>
   adminFetch(`/api/admin/matches/${matchId}/clean-sheet`, {
     method: 'POST',
@@ -139,14 +132,80 @@ export const setDeadline = (gameweekNumber, kickoffTime) =>
 // ── Players ───────────────────────────────────────────────────────────────────
 export const getPlayers = () => adminFetch('/api/players');
 
-// ── Leagues ───────────────────────────────────────────────────────────────────
-export const getMyLeagues = () => adminFetch('/api/leagues/my-leagues');
-export const getLeagueStandings = (id) => adminFetch(`/api/leagues/${id}/standings`);
+// ── Leagues & teams ───────────────────────────────────────────────────────────
+//
+// THIS IS THE BUG THAT BLANKED THE CONSOLE.
+//
+// Every page here used to call GET /api/leagues/my-leagues. That endpoint is
+// player-scoped: LeagueService.getMyLeagues() opens with
+//
+//     teamRepository.findByUserId(user.getId())
+//         .orElseThrow(() -> new RuntimeException("TEAM_NOT_FOUND"));
+//
+// and ApiErrors maps TEAM_NOT_FOUND to HTTP 404. The admin account does not
+// play the game, so it has no Team row and that call returned 404 on every
+// load — it could never have succeeded. Because three pages awaited it inside
+// Promise.all, the rejection also threw away the matches, gameweek and player
+// results fetched alongside it, which is why entire pages rendered empty
+// rather than just the league panel.
+//
+// The console now uses the platform-scoped endpoints added to AdminController.
+// They require the matching backend build — these paths do not exist on an
+// older deployment, so deploy the backend alongside this frontend.
+//
+// No compatibility fallback is attempted on purpose. Detecting "this route
+// isn't deployed yet" is not reliable here: under Spring Boot 4 an unmatched
+// path raises NoResourceFoundException, which GlobalExceptionHandler's
+// @ExceptionHandler(Exception.class) turns into a 500, not a 404. A shim
+// keying off the status code would therefore mistake genuine server errors for
+// a missing endpoint and quietly serve stale data instead of reporting the
+// fault. One contract, honestly enforced, beats a guess.
+
+/** Every league on the platform, with member counts. */
+export const getLeagues = () => adminFetch('/api/admin/leagues');
+
+/** Standings for any league, whether or not the caller is a member. */
+export const getLeagueStandings = (id) =>
+  adminFetch(`/api/admin/leagues/${id}/standings`);
+
+/**
+ * Every registered team, ranked by season total.
+ *
+ * Previously derived from the global league's standings, which under-reports:
+ * a team only appears there once autoJoinGlobalLeague has run for it.
+ */
+export const getTeams = () => adminFetch('/api/admin/teams');
+
+/**
+ * POST /api/leagues/create enrols the caller's own team as the league's first
+ * member, so it requires one and always returned 400 CREATE_TEAM_FIRST for an
+ * admin — the console's Create League button could never succeed. The admin
+ * endpoint creates the league empty; managers then join with the code.
+ */
 export const createLeague = (name) =>
-  adminFetch('/api/leagues/create', { method: 'POST', body: JSON.stringify({ name }) });
+  adminFetch('/api/admin/leagues', { method: 'POST', body: JSON.stringify({ name }) });
 
 // ── Gameweek ──────────────────────────────────────────────────────────────────
-export const getCurrentGameweek = () => adminFetch('/api/gameweek/current');
+//
+// GameweekController answers with { number, deadline } — it maps gw.getId()
+// onto the key "number" and there is no `id` in the payload at all. Every page
+// here read `gameweek.id`, which is therefore always undefined:
+//
+//   · Dashboard   — the Gameweek stat card rendered a permanent "GW —".
+//   · Tournament  — `if (gwData?.id)` never fired, so the set-deadline and
+//                   start-gameweek forms silently stayed on GW 1 no matter
+//                   which gameweek was actually live. Submitting them would
+//                   have retimed the wrong gameweek's fixtures.
+//   · Matches     — new matches defaulted to gameweek 1.
+//
+// Normalising once here keeps a single place aware of the wire format. `id` is
+// carried as an alias so the existing components keep working unchanged.
+export const getCurrentGameweek = async () => {
+  const gw = await adminFetch('/api/gameweek/current');
+  if (!gw) return null;
+  const number = gw.number ?? gw.id ?? null;
+  return { ...gw, number, id: number };
+};
 
 // ── Tournament ────────────────────────────────────────────────────────────────
 export const recalculatePoints = () =>

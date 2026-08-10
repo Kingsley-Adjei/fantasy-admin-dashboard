@@ -61,6 +61,9 @@ export default function MatchesPage() {
     onMatchLive: () => load(),
     onMatchCompleted: () => load(),
     onPointsUpdated: () => load(),
+    // set-deadline rewrites the kickoff time of every match in a gameweek,
+    // which this page renders — so it has to refetch when that happens.
+    onGameweekUpdated: () => load(),
   });
 
   const filtered = matches.filter(m => {
