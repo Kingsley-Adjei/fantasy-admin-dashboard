@@ -204,7 +204,14 @@ export const getCurrentGameweek = async () => {
   const gw = await adminFetch('/api/gameweek/current');
   if (!gw) return null;
   const number = gw.number ?? gw.id ?? null;
-  return { ...gw, number, id: number };
+  // `active` is the truth about whether a gameweek row is actually running.
+  // Older backends omitted it AND silently defaulted number to 1 when nothing
+  // was active — which is how the console showed "GW 1 ACTIVE" while
+  // finalize-gameweek simultaneously (and correctly) failed with "there's no
+  // gameweek running right now". Treat a missing flag as active for backward
+  // compatibility, but the current backend always sends it.
+  const active = gw.active ?? (number != null);
+  return { ...gw, number, id: number, active };
 };
 
 // ── Tournament ────────────────────────────────────────────────────────────────

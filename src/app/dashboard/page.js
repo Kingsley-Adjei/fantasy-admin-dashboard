@@ -148,8 +148,8 @@ export default function DashboardPage() {
         <StatCard
           icon={Calendar}
           label="Gameweek"
-          value={`GW ${String(gameweek?.id || '—').padStart(2, '0')}`}
-          badge={gameweek ? 'ACTIVE' : ''}
+          value={gameweek?.active ? `GW ${String(gameweek?.id || '—').padStart(2, '0')}` : 'None'}
+          badge={gameweek?.active ? 'ACTIVE' : 'NOT STARTED'}
           badgeClass="badge-green"
           delay={100}
         />

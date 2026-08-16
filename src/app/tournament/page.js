@@ -104,6 +104,13 @@ export default function TournamentPage() {
   };
 
   const handleFinalize = async () => {
+    // Fail fast with a message that explains the fix, instead of letting the
+    // server's NO_ACTIVE_GAMEWEEK ("there's no gameweek running right now")
+    // contradict the header. Nothing is running until Start Gameweek is used.
+    if (!gameweek?.active) {
+      addToast('No gameweek is running. Use "Start Next Gameweek" below to open one first.', 'error');
+      return;
+    }
     if (confirmText !== 'CONFIRM') {
       addToast('Type CONFIRM to proceed', 'error'); return;
     }
@@ -161,10 +168,16 @@ export default function TournamentPage() {
             <h1 className="page-title font-syne">Gameweek Control</h1>
             <p className="page-subtitle">Manage deadlines, live scoring, and gameweek transitions.</p>
           </div>
-          <span className="status-pill status-live">
-            <span className="live-dot" style={{ width: 6, height: 6, background: 'var(--accent)', borderRadius: '50%', display: 'inline-block' }} />
-            GW {gameweek?.id ?? '—'} ACTIVE
-          </span>
+          {gameweek?.active ? (
+            <span className="status-pill status-live">
+              <span className="live-dot" style={{ width: 6, height: 6, background: 'var(--accent)', borderRadius: '50%', display: 'inline-block' }} />
+              GW {gameweek?.id ?? '—'} ACTIVE
+            </span>
+          ) : (
+            <span className="status-pill" style={{ background: 'rgba(255,159,10,0.15)', color: 'var(--warning)', border: '1px solid rgba(255,159,10,0.3)' }}>
+              NO ACTIVE GAMEWEEK — start one below
+            </span>
+          )}
         </div>
       </div>
 
@@ -326,13 +339,19 @@ export default function TournamentPage() {
                   {incompleteMatches.length} match{incompleteMatches.length > 1 ? 'es' : ''} still unfinished. The server refuses to finalize while matches are incomplete.
                 </div>
               )}
+              {!gameweek?.active && (
+                <div style={{ background: 'var(--warning-dim)', border: '1px solid rgba(255,159,10,0.3)', borderRadius: 8, padding: '10px 14px', fontSize: 13, color: 'var(--warning)' }}>
+                  <AlertTriangle size={14} style={{ display: 'inline', marginRight: 6 }} />
+                  No gameweek is currently running — matches may exist, but the gameweek itself was never opened. Use "Start Next Gameweek" above, then finalize when its matches are done.
+                </div>
+              )}
               <button
                 className="btn btn-danger btn-lg w-full"
                 onClick={() => setShowConfirm(true)}
-                disabled={finalizeLoading}
-                style={{ borderRadius: 8 }}
+                disabled={finalizeLoading || !gameweek?.active}
+                style={{ borderRadius: 8, opacity: gameweek?.active ? 1 : 0.5 }}
               >
-                <AlertTriangle size={16} /> Finalize Gameweek {gameweek?.id ?? ''}
+                <AlertTriangle size={16} /> Finalize Gameweek {gameweek?.active ? (gameweek?.id ?? '') : '(none active)'}
               </button>
             </div>
           </div>
